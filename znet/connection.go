@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"io"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -19,6 +21,8 @@ type Connection struct {
 	TCPServer ziface.IServer
 	//当前连接的socket TCP套接字
 	Conn *net.TCPConn
+	//当前ws conn
+	WsConn *websocket.Conn
 	//当前连接的ID 也可以称作为SessionID，ID全局唯一
 	ConnID uint32
 	//消息管理MsgID和对应处理方法的消息管理模块
@@ -56,6 +60,24 @@ func NewConnection(server ziface.IServer, conn *net.TCPConn, connID uint32, msgH
 	return c
 }
 
+//NewWsConnection 创建连接的方法
+func NewWsConnection(server ziface.IServer, conn *websocket.Conn, connID uint32, msgHandler ziface.IMsgHandle) *Connection {
+	//初始化Conn属性
+	c := &Connection{
+		TCPServer:   server,
+		WsConn:      conn,
+		ConnID:      connID,
+		isClosed:    false,
+		MsgHandler:  msgHandler,
+		msgBuffChan: make(chan []byte, utils.GlobalObject.MaxMsgChanLen),
+		property:    nil,
+	}
+
+	//将新创建的Conn添加到链接管理中
+	c.TCPServer.GetConnMgr().Add(c)
+	return c
+}
+
 //StartWriter 写消息Goroutine， 用户将数据发送给客户端
 func (c *Connection) StartWriter() {
 	fmt.Println("[Writer Goroutine is running]")
@@ -67,6 +89,35 @@ func (c *Connection) StartWriter() {
 			if ok {
 				//有数据要写给客户端
 				if _, err := c.Conn.Write(data); err != nil {
+					fmt.Println("Send Buff Data error:, ", err, " Conn Writer exit")
+					return
+				}
+			} else {
+				fmt.Println("msgBuffChan is Closed")
+				break
+			}
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+//StartWsWriter 写消息Goroutine， 用户将数据发送给客户端
+func (c *Connection) StartWsWriter() {
+	fmt.Println("[Writer Goroutine is running]")
+	defer fmt.Println(c.WsConn.LocalAddr(), "[conn Writer exit!]")
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("write stop", string(debug.Stack()), r)
+		}
+	}()
+
+	for {
+		select {
+		case data, ok := <-c.msgBuffChan:
+			if ok {
+				//有数据要写给客户端
+				if err := c.WsConn.WriteMessage(websocket.TextMessage, data); err != nil {
 					fmt.Println("Send Buff Data error:, ", err, " Conn Writer exit")
 					return
 				}
@@ -99,7 +150,7 @@ func (c *Connection) StartReader() {
 				fmt.Println("read msg head error ", err)
 				return
 			}
-			//fmt.Printf("read headData %+v\n", headData)
+			fmt.Printf("read headData %+v\n", string(headData))
 
 			//拆包，得到msgID 和 datalen 放在msg中
 			msg, err := c.TCPServer.Packet().Unpack(headData)
@@ -136,6 +187,50 @@ func (c *Connection) StartReader() {
 	}
 }
 
+//StartWsReader 读消息Goroutine，用于从客户端中读取数据
+func (c *Connection) StartWsReader() {
+	fmt.Println("[Reader Goroutine is running]")
+	defer fmt.Println(c.WsConn.LocalAddr(), "[conn Reader exit!]")
+	defer c.Stop()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("WsReader stop", string(debug.Stack()), r)
+		}
+	}()
+
+	// 创建拆包解包的对象
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			_, message, err := c.WsConn.ReadMessage()
+			if err != nil {
+				fmt.Println("读取客户端数据 错误", c.WsConn.LocalAddr(), err)
+				return
+			}
+			// 处理程序
+			fmt.Println("读取客户端数据 处理:", string(message))
+			//得到当前客户端请求的Request数据
+			req := Request{
+				conn: c,
+				msg: &Message{
+					DataLen: uint32(len(message)),
+					Data:    message,
+				},
+			}
+
+			if utils.GlobalObject.WorkerPoolSize > 0 {
+				//已经启动工作池机制，将消息交给Worker处理
+				c.MsgHandler.SendMsgToTaskQueue(&req)
+			} else {
+				//从绑定好的消息和对应的处理方法中执行对应的Handle方法
+				go c.MsgHandler.DoMsgHandler(&req)
+			}
+		}
+	}
+}
+
 //Start 启动连接，让当前连接开始工作
 func (c *Connection) Start() {
 	c.ctx, c.cancel = context.WithCancel(context.Background())
@@ -149,6 +244,26 @@ func (c *Connection) Start() {
 	select {
 	case <-c.ctx.Done():
 		c.finalizer()
+		return
+	}
+}
+
+//WsStart 启动连接，让当前连接开始工作
+func (c *Connection) WsStart(cID *uint32) {
+	defer func() {
+		*cID--
+	}()
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	//1 开启用户从客户端读取数据流程的Goroutine
+	go c.StartWsReader()
+	//2 开启用于写回客户端数据流程的Goroutine
+	go c.StartWsWriter()
+	//按照用户传递进来的创建连接时需要处理的业务，执行钩子方法
+	//c.TCPServer.CallOnConnStart(c)
+
+	select {
+	case <-c.ctx.Done():
+		c.wsfinalizer()
 		return
 	}
 }
@@ -192,6 +307,23 @@ func (c *Connection) SendMsg(msgID uint32, data []byte) error {
 	//写回客户端
 	_, err = c.Conn.Write(msg)
 	return err
+}
+
+//SendMsg 直接将Message数据发送数据给远程的TCP客户端
+func (c *Connection) SendWsMsg(data []byte) error {
+	c.RLock()
+	defer c.RUnlock()
+	if c.isClosed == true {
+		return errors.New("connection closed when send msg")
+	}
+
+	//写回客户端
+	//有数据要写给客户端
+	if err := c.WsConn.WriteMessage(websocket.TextMessage, data); err != nil {
+		fmt.Println("Send Buff Data error:, ", err, " Conn Writer exit")
+		return err
+	}
+	return nil
 }
 
 //SendBuffMsg  发生BuffMsg
@@ -278,6 +410,32 @@ func (c *Connection) finalizer() {
 
 	// 关闭socket链接
 	_ = c.Conn.Close()
+
+	//将链接从连接管理器中删除
+	c.TCPServer.GetConnMgr().Remove(c)
+
+	//关闭该链接全部管道
+	close(c.msgBuffChan)
+	//设置标志位
+	c.isClosed = true
+}
+
+func (c *Connection) wsfinalizer() {
+	//如果用户注册了该链接的关闭回调业务，那么在此刻应该显示调用
+	//c.TCPServer.CallOnConnStop(c)
+
+	c.Lock()
+	defer c.Unlock()
+
+	//如果当前链接已经关闭
+	if c.isClosed == true {
+		return
+	}
+
+	fmt.Println("Conn Stop()...ConnID = ", c.ConnID)
+
+	// 关闭socket链接
+	_ = c.WsConn.Close()
 
 	//将链接从连接管理器中删除
 	c.TCPServer.GetConnMgr().Remove(c)

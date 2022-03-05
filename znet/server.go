@@ -2,21 +2,14 @@ package znet
 
 import (
 	"fmt"
-	"net"
-
 	"github.com/aceld/zinx/utils"
 	"github.com/aceld/zinx/ziface"
+	"github.com/gorilla/websocket"
+	"net"
+	"net/http"
 )
 
-var zinxLogo = `                                        
-              ██                        
-              ▀▀                        
- ████████   ████     ██▄████▄  ▀██  ██▀ 
-     ▄█▀      ██     ██▀   ██    ████   
-   ▄█▀        ██     ██    ██    ▄██▄   
- ▄██▄▄▄▄▄  ▄▄▄██▄▄▄  ██    ██   ▄█▀▀█▄  
- ▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀  ▀▀    ▀▀  ▀▀▀  ▀▀▀ 
-                                        `
+var zinxLogo = `=============Spica=============`
 var topLine = `┌───────────────────────────────────────────────────┐`
 var borderLine = `│`
 var bottomLine = `└───────────────────────────────────────────────────┘`
@@ -41,6 +34,9 @@ type Server struct {
 	OnConnStop func(conn ziface.IConnection)
 
 	packet ziface.Packet
+
+	//ws cID
+	WsCID uint32
 }
 
 //NewServer 创建一个服务器句柄
@@ -121,6 +117,24 @@ func (s *Server) Start() {
 	}()
 }
 
+//StartWebSocket 开启ws网络服务
+func (s *Server) StartWebSocket() {
+	fmt.Printf("[StartWebSocket] Server name: %s,listenner at IP: %s, Port %d is starting\n", s.Name, s.IP, s.Port)
+
+	//开启一个go去做服务端Linster业务
+	go func() {
+		//0 启动worker工作池机制
+		s.msgHandler.StartWorkerPool()
+
+		//1 监听服务器地址
+		http.HandleFunc("/", s.WsHandler)
+		http.ListenAndServe(fmt.Sprintf("%s:%d", s.IP, s.Port), nil)
+
+		//已经监听成功
+		fmt.Println("start ws server  ", s.Name, " succ, now listenning...")
+	}()
+}
+
 //Stop 停止服务
 func (s *Server) Stop() {
 	fmt.Println("[STOP] Zinx server , name ", s.Name)
@@ -132,6 +146,16 @@ func (s *Server) Stop() {
 //Serve 运行服务
 func (s *Server) Serve() {
 	s.Start()
+
+	//TODO Server.Serve() 是否在启动服务的时候 还要处理其他的事情呢 可以在这里添加
+
+	//阻塞,否则主Go退出， listenner的go将会退出
+	select {}
+}
+
+//WsServe 运行服务
+func (s *Server) WsServe() {
+	s.StartWebSocket()
 
 	//TODO Server.Serve() 是否在启动服务的时候 还要处理其他的事情呢 可以在这里添加
 
@@ -177,6 +201,39 @@ func (s *Server) CallOnConnStop(conn ziface.IConnection) {
 
 func (s *Server) Packet() ziface.Packet {
 	return s.packet
+}
+
+func (s *Server) WsHandler(w http.ResponseWriter, req *http.Request) {
+
+	// 升级协议
+	conn, err := (&websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
+		fmt.Println("升级协议", "ua:", r.Header["User-Agent"], "referer:", r.Header["Referer"])
+
+		return true
+	}}).Upgrade(w, req, nil)
+	if err != nil {
+		http.NotFound(w, req)
+
+		return
+	}
+
+	if s.ConnMgr.Len() >= utils.GlobalObject.MaxConn {
+		err := conn.Close()
+		if err != nil {
+			return
+		}
+		http.Error(w, fmt.Sprintf("MaxConn Limit:%d", utils.GlobalObject.MaxConn), 400)
+		return
+	}
+
+	fmt.Println("webSocket 建立连接:", conn.RemoteAddr().String())
+	//处理该新连接请求的 业务 方法， 此时应该有 handler 和 conn是绑定的
+	dealConn := NewWsConnection(s, conn, s.WsCID, s.msgHandler)
+	s.WsCID++
+
+	//3.4 启动当前链接的处理业务
+	go dealConn.WsStart(&s.WsCID)
+
 }
 
 func printLogo() {
