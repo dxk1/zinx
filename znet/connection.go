@@ -40,6 +40,8 @@ type Connection struct {
 	propertyLock sync.Mutex
 	//当前连接的关闭状态
 	isClosed bool
+	//链接对应path
+	path string
 }
 
 //NewConnection 创建连接的方法
@@ -61,7 +63,8 @@ func NewConnection(server ziface.IServer, conn *net.TCPConn, connID uint32, msgH
 }
 
 //NewWsConnection 创建连接的方法
-func NewWsConnection(server ziface.IServer, conn *websocket.Conn, connID uint32, msgHandler ziface.IMsgHandle) *Connection {
+func NewWsConnection(server ziface.IServer, conn *websocket.Conn, connID uint32,
+	msgHandler ziface.IMsgHandle, path string) *Connection {
 	//初始化Conn属性
 	c := &Connection{
 		TCPServer:   server,
@@ -71,6 +74,7 @@ func NewWsConnection(server ziface.IServer, conn *websocket.Conn, connID uint32,
 		MsgHandler:  msgHandler,
 		msgBuffChan: make(chan []byte, utils.GlobalObject.MaxMsgChanLen),
 		property:    nil,
+		path:        path,
 	}
 
 	//将新创建的Conn添加到链接管理中
@@ -281,6 +285,11 @@ func (c *Connection) GetTCPConnection() *net.TCPConn {
 //GetConnID 获取当前连接ID
 func (c *Connection) GetConnID() uint32 {
 	return c.ConnID
+}
+
+//GetConnPath 获取当前连接Path
+func (c *Connection) GetConnPath() string {
+	return c.path
 }
 
 //RemoteAddr 获取远程客户端地址信息

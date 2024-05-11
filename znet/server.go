@@ -228,7 +228,7 @@ func (s *Server) WsHandler(w http.ResponseWriter, req *http.Request) {
 
 	fmt.Println("webSocket 建立连接:", conn.RemoteAddr().String())
 	//处理该新连接请求的 业务 方法， 此时应该有 handler 和 conn是绑定的
-	dealConn := NewWsConnection(s, conn, s.WsCID, s.msgHandler)
+	dealConn := NewWsConnection(s, conn, s.WsCID, s.msgHandler, req.RequestURI)
 	s.WsCID++
 
 	//3.4 启动当前链接的处理业务

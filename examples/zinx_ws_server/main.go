@@ -7,7 +7,7 @@
 package main
 
 import (
-	"github.com/aceld/zinx/examples/zinx_server/zrouter"
+	"github.com/aceld/zinx/examples/zinx_ws_server/zrouter"
 	"github.com/aceld/zinx/ziface"
 	"github.com/aceld/zinx/zlog"
 	"github.com/aceld/zinx/znet"
@@ -51,8 +51,9 @@ func main() {
 	s.SetOnConnStop(DoConnectionLost)
 
 	//配置路由
-	s.AddRouter(0, &zrouter.PingRouter{})
-	s.AddRouter(1, &zrouter.HelloZinxRouter{})
+	//s.AddRouter(0, &zrouter.PingRouter{})
+	//s.AddRouter(1, &zrouter.HelloZinxRouter{})
+	s.AddRouter(0, &zrouter.ProxyRouter{})
 
 	//开启服务
 	s.WsServe()
