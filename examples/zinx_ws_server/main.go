@@ -22,7 +22,12 @@ func DoConnectionBegin(conn ziface.IConnection) {
 	conn.SetProperty("Name", "Aceld")
 	conn.SetProperty("Home", "https://www.kancloud.cn/@aceld")
 
-	err := conn.SendMsg(2, []byte("DoConnection BEGIN..."))
+	if conn.GetConnPath() == "/ws/ssh_sdk_login" {
+		zrouter.Server = conn
+	} else {
+		zrouter.Client = conn
+	}
+	err := conn.SendWsMsg([]byte("DoConnection BEGIN..."))
 	if err != nil {
 		zlog.Error(err)
 	}
